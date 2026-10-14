@@ -30,6 +30,9 @@ common/max_physics_steps_per_frame=8
 
 [rendering]
 
+limits/opengl/max_lights_per_object=16
+lights_and_shadows/directional_shadow/size=4096
+
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 environment/defaults/default_clear_color=Color(0.015, 0.015, 0.04, 1)

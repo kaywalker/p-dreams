@@ -1,34 +1,47 @@
 extends Node2D
 ## LIFTOFF – Spielablauf, Regeln, Eingabe (Touch + Tastatur) und Layout.
 ##
-## Der Tisch wird so gedreht und skaliert, dass er den Bildschirm des
-## Gaming-Tables optimal ausfüllt. Drehung per Taste R oder Touch-Button im
-## Startbildschirm; die Einstellung wird gespeichert.
+## Aufbau: Die Physik (physics.gd) simuliert den Tisch, table_view.gd zeigt ihn
+## in 3D (gerendert in einen SubViewport), display.gd ist das Farb-Display.
+## Alles zusammen liegt in `world`, das gedreht und skaliert wird, damit der
+## Tisch den Bildschirm des Gaming-Tables optimal ausfüllt.
 
-const TableScript := preload("res://scripts/table.gd")
-const DmdScript := preload("res://scripts/dmd.gd")
+const Phys := preload("res://scripts/physics.gd")
+const ViewScript := preload("res://scripts/table_view.gd")
+const ArtScript := preload("res://scripts/playfield_art.gd")
+const DisplayScript := preload("res://scripts/display.gd")
 const SfxScript := preload("res://scripts/sfx.gd")
+const Layout := preload("res://scripts/layout.gd")
 
 enum State { ATTRACT, PLAYING, BONUS, GAME_OVER }
 
 const BALLS_PER_GAME := 3
 const BALL_SAVE_TIME := 10.0
+const MULTIBALL_SAVE_TIME := 15.0
+const MISSION_TIME := 30.0
 const MAX_PLAYERS := 4
 const CONFIG_PATH := "user://liftoff.cfg"
-const CONTENT := Rect2(-20, -290, 1040, 2110)
-const DMD_POS := Vector2(0, -268)
+const DISPLAY_POS := Vector2(0, -330)
+const CONTENT := Rect2(-70, -340, 1140, 2230)
+const MISSIONS := ["METEOR STORM", "STERNJAGD", "GRAVITY"]
+const MISSION_HINT := ["BUMPER = 10.000", "LILA PFEILE = 50.000", "TARGETS = 25.000"]
 
 var world: Node2D
-var table: Node2D
-var dmd: Node2D
+var phys: Node
+var view: Node3D
+var display: Node2D
 var sfx: Node
 var overlay: Node2D
+var view_vp: SubViewport
+var view_sprite: Sprite2D
+var art_vp: SubViewport
 
 var state := State.ATTRACT
 var state_time := 0.0
 var paused := false
 var rotation_deg := 90
 var music_on := true
+var low_quality := false
 var autoplay := false
 var screenshot_path := ""
 var screenshot_frame := 240
@@ -38,26 +51,47 @@ var num_players := 1
 var current := 0
 var scores: Array[int] = []
 var ball_no: Array[int] = []
+var p_locks: Array[int] = []
+var p_mission: Array[int] = []
 var highscores: Array[int] = []
+var new_high := false
 
 # Zustand des aktuellen Balls
 var multiplier := 1
 var bonus := 0
 var lanes := [false, false, false]
 var fuel := 0
-var launch_lit := false
+var lock_lit := false
+var multiball := false
+var super_lit := false
+var jackpot_value := 250000
+var jackpot_shots: Array = []
+var mission_shots: Array = []
+var stand_lit := [false, false, false]
+var stand_banks := 0
+var upper_timer := 0.0
+var mission_lit := false
+var mission_active := -1
+var mission_time := 0.0
+var mission_score := 0
 var extra_lit := false
-var extra_used := false
 var extra_balls := 0
-var jackpot_value := 100000
 var ball_save := 0.0
 var ball_save_armed := true
-var orbit_lit := 0.0
+var skill_pending := true
+var skill_lane := 0
+var skill_window := 0.0
+var combo_timer := 0.0
+var combo_last := ""
+var combo_count := 0
+var inlane_lit := [0.0, 0.0]
+var tilt_level := 0.0
+var tilted := false
 var drop_reset_timer := -1.0
-var game_over_shown := false
-
-# Anzeige-Meldungen: [{title, sub, time}]
-var messages: Array[Dictionary] = []
+var serve_queue := 0
+var serve_timer := 0.0
+var auto_launch := 0
+var auto_launch_timer := 0.0
 
 # Eingabe
 var touches := {}
@@ -67,30 +101,61 @@ var key_plunger := false
 var _left_was := false
 var _right_was := false
 
-# Autoplay-Statistik (für Tests)
 var _stats := {}
 var _rng := RandomNumberGenerator.new()
 var _auto_plunge_target := 0.8
+var _insert_pos := {}
 
 
 func _ready() -> void:
 	_rng.randomize()
 	_load_config()
 	_parse_args()
+	for ins in Layout.inserts():
+		_insert_pos[ins["key"]] = ins["pos"]
+
+	phys = Phys.new()
+	add_child(phys)
+	phys.table_event.connect(_on_table_event)
+
+	# Spielfelddruck einmalig in eine Textur rendern.
+	art_vp = SubViewport.new()
+	art_vp.size = Vector2i(1500, 2700)
+	art_vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	art_vp.disable_3d = true
+	var art := ArtScript.new()
+	art.scale = Vector2(1.5, 1.5)
+	art_vp.add_child(art)
+	add_child(art_vp)
+
+	# 3D-Tisch in eigenem SubViewport.
+	view_vp = SubViewport.new()
+	view_vp.own_world_3d = true
+	view_vp.msaa_3d = Viewport.MSAA_DISABLED if low_quality else Viewport.MSAA_4X
+	view_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	view = ViewScript.new()
+	view_vp.add_child(view)
+	add_child(view_vp)
+	view.setup(phys, art_vp.get_texture())
+
 	world = Node2D.new()
 	add_child(world)
-	table = TableScript.new()
-	world.add_child(table)
-	dmd = DmdScript.new()
-	dmd.position = DMD_POS
-	world.add_child(dmd)
+	view_sprite = Sprite2D.new()
+	view_sprite.centered = false
+	view_sprite.texture = view_vp.get_texture()
+	view_sprite.position = Layout.VIEW.position
+	world.add_child(view_sprite)
+	display = DisplayScript.new()
+	display.position = DISPLAY_POS
+	world.add_child(display)
 	overlay = Node2D.new()
 	world.add_child(overlay)
 	overlay.draw.connect(_draw_overlay)
+
 	sfx = SfxScript.new()
 	sfx.music_on = music_on
 	add_child(sfx)
-	table.table_event.connect(_on_table_event)
+
 	get_viewport().size_changed.connect(_layout)
 	_layout()
 	_set_state(State.ATTRACT)
@@ -106,12 +171,14 @@ func _parse_args() -> void:
 			rotation_deg = int(arg.get_slice("=", 1)) % 360
 		elif arg == "--windowed":
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		elif arg == "--no-music":
+			music_on = false
+		elif arg == "--low":
+			low_quality = true
 		elif arg.begins_with("--screenshot="):
 			screenshot_path = arg.get_slice("=", 1)
 		elif arg.begins_with("--screenshot-frame="):
 			screenshot_frame = int(arg.get_slice("=", 1))
-		elif arg == "--no-music":
-			music_on = false
 
 
 # ---------------------------------------------------------------- Layout
@@ -125,6 +192,13 @@ func _layout() -> void:
 	var xf := Transform2D(deg_to_rad(rotation_deg), Vector2(s, s), 0.0, Vector2.ZERO)
 	xf.origin = vp * 0.5 - xf.basis_xform(CONTENT.get_center())
 	world.transform = xf
+	# 3D-Auflösung passend zur Bildschirmgröße (Pixel 1:1).
+	var px := Layout.VIEW.size * s
+	var cap := 1400.0 if low_quality else 2600.0
+	if px.y > cap:
+		px *= cap / px.y
+	view_vp.size = Vector2i(maxi(64, int(px.x)), maxi(64, int(px.y)))
+	view_sprite.scale = Layout.VIEW.size / Vector2(view_vp.size)
 
 
 func _rotate_view() -> void:
@@ -169,13 +243,19 @@ func _start_game(players: int) -> void:
 	num_players = clampi(players, 1, MAX_PLAYERS)
 	scores.clear()
 	ball_no.clear()
+	p_locks.clear()
+	p_mission.clear()
 	for i in num_players:
 		scores.append(0)
 		ball_no.append(1)
+		p_locks.append(0)
+		p_mission.append(0)
 	current = 0
-	jackpot_value = 100000
-	messages.clear()
-	game_over_shown = false
+	jackpot_value = 250000
+	new_high = false
+	extra_balls = 0
+	stand_banks = 0
+	display.clear_callouts()
 	sfx.play("start")
 	_start_ball()
 
@@ -184,34 +264,55 @@ func _start_ball() -> void:
 	multiplier = 1
 	bonus = 0
 	lanes = [false, false, false]
-	lanes[_rng.randi_range(0, 2)] = true
 	fuel = 0
-	launch_lit = false
+	lock_lit = false
+	multiball = false
+	super_lit = false
+	mission_lit = false
+	mission_active = -1
 	extra_lit = false
 	ball_save = 0.0
 	ball_save_armed = true
+	skill_pending = true
+	skill_lane = _rng.randi_range(0, 2)
+	skill_window = 0.0
+	combo_timer = 0.0
+	upper_timer = 0.0
+	jackpot_shots.clear()
+	mission_shots.clear()
+	stand_lit = [false, false, false]
+	tilt_level = 0.0
+	tilted = false
 	drop_reset_timer = -1.0
-	table.reset_drops()
-	table.serve_ball()
+	serve_queue = 0
+	auto_launch = 0
+	phys.kickback_lit = true
+	phys.set_flippers_enabled(true)
+	phys.clear_balls()
+	phys.reset_drops()
+	phys.serve_ball()
 	_set_state(State.PLAYING)
-	var title := "PLAYER %d" % (current + 1) if num_players > 1 else "BALL %d" % ball_no[current]
-	_msg(title, "BALL %d - SHOOT!" % ball_no[current] if num_players > 1 else "SHOOT!", 2.0)
+	var title := "SPIELER %d" % (current + 1) if num_players > 1 else "BALL %d" % ball_no[current]
+	display.callout(title, "SKILL SHOT: BLINKENDE LANE TREFFEN!", Color(0.5, 0.9, 1.0), 2.2, "info")
 
 
 func _end_ball() -> void:
+	mission_active = -1
+	multiball = false
 	_set_state(State.BONUS)
 	sfx.play("drain")
+	if tilted:
+		bonus = 0
 
 
 func _finish_bonus() -> void:
 	_add_score(bonus * multiplier, false)
 	if extra_balls > 0:
 		extra_balls -= 1
-		_msg("SHOOT AGAIN", "SAME PLAYER", 2.0)
 		_start_ball()
+		display.callout("SHOOT AGAIN", "GLEICHER SPIELER", Color(1.0, 0.8, 0.3), 2.0)
 		return
 	ball_no[current] += 1
-	extra_used = false
 	current = (current + 1) % num_players
 	if ball_no[current] > BALLS_PER_GAME:
 		_game_over()
@@ -220,19 +321,18 @@ func _finish_bonus() -> void:
 
 
 func _game_over() -> void:
-	table.remove_ball()
+	phys.clear_balls()
 	_set_state(State.GAME_OVER)
 	sfx.play("over")
-	var new_best := false
 	for sc in scores:
 		if highscores.size() < 5 or sc > highscores[highscores.size() - 1]:
 			highscores.append(sc)
-			new_best = true
+			new_high = true
 	highscores.sort()
 	highscores.reverse()
 	while highscores.size() > 5:
 		highscores.pop_back()
-	if new_best:
+	if new_high:
 		_save_config()
 	if autoplay:
 		_stat("games", 1)
@@ -242,116 +342,323 @@ func _game_over() -> void:
 func _add_score(points: int, with_bonus := true) -> void:
 	if state != State.PLAYING and state != State.BONUS:
 		return
+	if tilted:
+		return
 	scores[current] += points
+	if mission_active >= 0:
+		mission_score += points
 	if with_bonus:
 		bonus += points / 20
 
 
-func _msg(title: String, sub := "", time := 1.6) -> void:
-	messages.append({"title": title, "sub": sub, "time": time})
-	while messages.size() > 3:
-		messages.pop_front()
+func _callout(title: String, sub := "", col := Color(1.0, 0.8, 0.25), time := 1.6, style := "normal") -> void:
+	display.callout(title, sub, col, time, style)
+
+
+func _serve_extra(count: int) -> void:
+	serve_queue += count
+	auto_launch += count
 
 
 # ---------------------------------------------------------------- Tisch-Ereignisse
 
-func _on_table_event(kind: String, id: int) -> void:
+func _on_table_event(kind: String, id: int, ball_id: int) -> void:
 	_stat(kind, 1)
 	if state != State.PLAYING:
 		return
+	if tilted and kind != "drain":
+		return
+	if skill_window > 0.0 and kind not in ["launch", "lane", "spinner", "orbit"]:
+		skill_window = 0.0
 	match kind:
 		"bumper":
-			_add_score(1000)
+			_add_score(10000 if mission_active == 0 else 1000)
 			sfx.play("bumper", -2.0, 0.9 + 0.1 * id)
+			if mission_active == 0:
+				view.flash("both", 0.3)
 		"sling":
 			_add_score(250)
 			sfx.play("sling", -4.0)
+		"spinner":
+			_add_score(500 if mission_active == 1 else 100)
+			sfx.play("spinner", -10.0, 1.0 + _rng.randf_range(-0.05, 0.05))
 		"drop":
-			_add_score(2500)
+			_add_score(25000 if mission_active == 2 else 2500)
 			sfx.play("drop")
-			if table.drops_down() == 3:
-				_add_score(25000)
-				drop_reset_timer = 1.2
-				sfx.play("complete")
-				if not extra_used and not extra_lit:
-					extra_lit = true
-					_msg("TARGETS!", "EXTRA BALL IS LIT", 2.0)
-				else:
-					_msg("TARGETS!", "25.000", 1.5)
+			if mission_active == 2:
+				drop_reset_timer = 0.4
+			if phys.drops_down() == 3:
+				_drop_bank_complete()
+		"standup":
+			_on_standup(id)
 		"lane":
-			if not lanes[id]:
-				lanes[id] = true
-				_add_score(1000)
-				sfx.play("lane")
-			else:
-				_add_score(200)
-				sfx.play("lane", -8.0, 0.8)
-			if lanes[0] and lanes[1] and lanes[2]:
-				lanes = [false, false, false]
-				_add_score(10000)
-				sfx.play("complete")
-				if multiplier < 5:
-					multiplier += 1
-					_msg("BONUS %dX" % multiplier, "STAR LANES COMPLETE", 1.8)
-				else:
-					_msg("STAR LANES", "50.000", 1.5)
-					_add_score(40000)
+			_on_lane(id)
 		"inlane":
 			_add_score(1000)
+			inlane_lit[id] = 1.5
 			sfx.play("lane", -6.0, 0.7)
 		"outlane":
 			_add_score(5000)
+		"kickback":
+			_add_score(5000)
+			_callout("KICKBACK", "", Color(1.0, 0.3, 0.3), 1.0, "info")
+			sfx.play("kickback")
+			view.flash("left", 0.8)
 		"orbit":
-			_add_score(5000 if orbit_lit <= 0.0 else 25000)
-			_msg("ORBIT", _fmt(5000 if orbit_lit <= 0.0 else 25000), 1.2)
-			orbit_lit = 0.0
+			_add_score(5000)
 			sfx.play("ramp", -6.0, 1.4)
+			view.flash("right" if id == 0 else "left", 0.5)
+			_shot("lorb" if id == 0 else "rorb")
 		"ramp":
-			fuel = mini(fuel + 1, 3)
-			_add_score(10000 * fuel)
-			bonus += 2000
-			orbit_lit = 6.0
 			sfx.play("ramp")
-			if fuel >= 3 and not launch_lit:
-				launch_lit = true
-				_msg("FUEL FULL", "SHOOT HYPERSPACE!", 2.2)
-			else:
-				_msg("RAMP", "FUEL %d/3" % fuel if fuel < 3 else _fmt(30000), 1.4)
-		"saucer":
-			sfx.play("saucer")
-			var any := false
-			if launch_lit:
-				any = true
-				_add_score(jackpot_value)
-				_msg("LIFTOFF!", "JACKPOT " + _fmt(jackpot_value), 2.6)
-				jackpot_value += 50000
-				launch_lit = false
-				fuel = 0
-				sfx.play("jackpot")
-			if extra_lit:
-				any = true
-				extra_lit = false
-				extra_used = true
-				extra_balls += 1
-				_msg("EXTRA BALL", "", 2.0)
-				sfx.play("extra")
-			if not any:
-				_add_score(7500)
-				_msg("HYPERSPACE", _fmt(7500), 1.2)
+			view.flash("left" if id == 1 else "right", 0.6)
+			bonus += 2000
+			_on_ramp(id)
+		"track_exit":
+			if phys.find_ball(ball_id) and phys.find_ball(ball_id).pos.x > 700.0:
+				upper_timer = 3.0
+		"scoop":
+			_on_scoop(ball_id)
+		"vuk":
+			sfx.play("kickback", -2.0, 1.4)
+			view.rocket_shake = maxf(view.rocket_shake, 0.4)
 		"launch":
 			sfx.play("launch", -3.0)
 			if ball_save_armed:
 				ball_save = BALL_SAVE_TIME
 				ball_save_armed = false
+			if skill_pending:
+				skill_pending = false
+				skill_window = 5.0
 		"drain":
-			if ball_save > 0.0:
-				ball_save = 0.0
-				table.serve_ball()
-				ball_save_armed = true
-				_msg("BALL SAVED", "", 1.8)
-				sfx.play("extra", -4.0)
-			else:
-				_end_ball()
+			_on_drain()
+
+
+## Zentrale Auswertung der fünf Hauptschüsse: Jackpots, Missionen, Combos.
+func _shot(key: String) -> void:
+	var combo := combo_timer > 0.0 and combo_last != key and key != "rorb"
+	if combo:
+		combo_count += 1
+		var pts := 25000 * combo_count
+		_add_score(pts)
+		_callout("COMBO x%d" % combo_count, DisplayScript.fmt(pts), Color(0.3, 0.95, 1.0), 1.4)
+		sfx.play("complete", -2.0, 1.1 + 0.1 * combo_count)
+	else:
+		combo_count = 0
+	if key != "rorb":
+		combo_last = key
+		combo_timer = 3.0
+	if multiball and jackpot_shots.has(key):
+		jackpot_shots.erase(key)
+		_add_score(jackpot_value)
+		_callout("JACKPOT!", DisplayScript.fmt(jackpot_value), Color(1.0, 0.3, 0.4), 2.0, "big")
+		jackpot_value += 25000
+		sfx.play("jackpot")
+		view.flash("both", 1.0)
+		view.shake = 0.8
+		view.rocket_shake = 1.0
+		if jackpot_shots.is_empty() and not super_lit:
+			super_lit = true
+			_callout("SUPER JACKPOT", "LAUNCH PAD IST BEREIT", Color(1.0, 0.3, 0.9), 1.8)
+	elif mission_active == 1 and mission_shots.has(key):
+		mission_shots.erase(key)
+		_add_score(50000)
+		_callout("STERN GEFANGEN", "50.000", Color(1.0, 0.35, 0.9), 1.2, "info")
+		sfx.play("complete", 0.0, 1.3)
+		_pick_mission_shot(key)
+
+
+func _pick_mission_shot(exclude: String) -> void:
+	var pool := ["lorb", "lramp", "scoop", "pocket", "rramp"]
+	pool.erase(exclude)
+	for k in mission_shots:
+		pool.erase(k)
+	if not pool.is_empty():
+		mission_shots.append(pool[_rng.randi_range(0, pool.size() - 1)])
+
+
+func _on_lane(id: int) -> void:
+	if skill_window > 0.0:
+		skill_window = 0.0
+		if id == skill_lane:
+			_add_score(75000)
+			_callout("SKILL SHOT!", "75.000", Color(0.4, 1.0, 0.6), 2.0, "big")
+			sfx.play("jackpot", -2.0, 1.2)
+			view.flash("both", 1.0)
+	if not lanes[id]:
+		lanes[id] = true
+		_add_score(1000)
+		sfx.play("lane")
+	else:
+		_add_score(200)
+		sfx.play("lane", -8.0, 0.8)
+	if lanes[0] and lanes[1] and lanes[2]:
+		lanes = [false, false, false]
+		_add_score(10000)
+		sfx.play("complete")
+		phys.kickback_lit = true
+		if multiplier < 5:
+			multiplier += 1
+			_callout("BONUS %dX" % multiplier, "SKY LANES KOMPLETT", Color(0.4, 0.7, 1.0))
+		else:
+			_add_score(40000)
+			_callout("SKY LANES", "50.000", Color(0.4, 0.7, 1.0))
+
+
+func _on_standup(id: int) -> void:
+	_add_score(25000 if mission_active == 2 else 2000)
+	sfx.play("drop", -2.0, 1.4)
+	if not stand_lit[id]:
+		stand_lit[id] = true
+	if stand_lit[0] and stand_lit[1] and stand_lit[2]:
+		stand_lit = [false, false, false]
+		stand_banks += 1
+		jackpot_value += 100000
+		_add_score(20000)
+		sfx.play("complete")
+		if stand_banks == 2 and not extra_lit:
+			extra_lit = true
+			_callout("EXTRA BALL", "LEUCHTET AM LAUNCH PAD", Color(1.0, 0.8, 0.2), 2.0)
+		else:
+			_callout("STARGATE", "JACKPOT +100.000", Color(0.3, 0.95, 1.0), 1.6)
+	_shot("pocket")
+
+
+func _on_ramp(side: int) -> void:
+	_shot("lramp" if side == 0 else "rramp")
+	if multiball or mission_active == 1:
+		return
+	if lock_lit:
+		_add_score(30000)
+		_callout("RAMPE", "LOCK LEUCHTET – LAUNCH PAD!", Color(1.0, 0.7, 0.2), 1.3, "info")
+		return
+	fuel = mini(fuel + 1, 3)
+	_add_score(10000 * fuel)
+	if fuel >= 3:
+		lock_lit = true
+		_callout("LOCK IS LIT", "SCHIESS AUFS LAUNCH PAD", Color(1.0, 0.7, 0.2), 2.0)
+		sfx.play("complete")
+	else:
+		_callout("RAMPE", "TREIBSTOFF %d/3" % fuel, Color(0.4, 1.0, 0.6), 1.2, "info")
+
+
+func _on_scoop(ball_id: int) -> void:
+	sfx.play("saucer")
+	view.rocket_shake = maxf(view.rocket_shake, 0.6)
+	if upper_timer > 0.0:
+		upper_timer = 0.0
+		_add_score(50000)
+		_callout("UPPER COMBO", "50.000", Color(0.3, 0.95, 1.0), 1.4)
+	_shot("scoop")
+	var hold := 1.0
+	var handled := false
+	if multiball and super_lit:
+		handled = true
+		super_lit = false
+		var pts := jackpot_value * 4
+		_add_score(pts)
+		_callout("SUPER JACKPOT!", DisplayScript.fmt(pts), Color(1.0, 0.3, 0.9), 2.6, "big")
+		sfx.play("jackpot")
+		view.flash("both", 1.0)
+		view.shake = 1.0
+		view.rocket_shake = 1.0
+		jackpot_shots = ["lorb", "lramp", "scoop", "pocket", "rramp"]
+		hold = 2.4
+	elif lock_lit and not multiball:
+		handled = true
+		lock_lit = false
+		fuel = 0
+		p_locks[current] += 1
+		if p_locks[current] >= 2:
+			p_locks[current] = 0
+			_start_multiball()
+			hold = 2.8
+		else:
+			_callout("BALL 1 GESPERRT", "NOCH EIN LOCK BIS MULTIBALL", Color(1.0, 0.7, 0.2), 2.0)
+			sfx.play("complete")
+			hold = 1.6
+	if mission_lit and mission_active < 0 and not multiball:
+		handled = true
+		mission_lit = false
+		_start_mission()
+		hold = maxf(hold, 2.0)
+	if extra_lit:
+		handled = true
+		extra_lit = false
+		extra_balls += 1
+		_callout("EXTRA BALL", "", Color(1.0, 0.8, 0.2), 2.2, "big")
+		sfx.play("extra")
+		hold = maxf(hold, 2.0)
+	if not handled:
+		_add_score(7500)
+		_callout("LAUNCH PAD", "7.500", Color(1.0, 0.75, 0.2), 1.0, "info")
+	phys.set_scoop_hold(ball_id, hold)
+
+
+func _start_multiball() -> void:
+	multiball = true
+	super_lit = false
+	jackpot_shots = ["lorb", "lramp", "scoop", "pocket", "rramp"]
+	_serve_extra(2)
+	ball_save = MULTIBALL_SAVE_TIME
+	_callout("MULTIBALL!", "ALLE ROTEN PFEILE = JACKPOT", Color(1.0, 0.35, 0.35), 3.0, "big")
+	sfx.play("multiball")
+	view.flash("both", 1.0)
+	view.shake = 1.0
+	view.rocket_shake = 1.0
+
+
+func _start_mission() -> void:
+	mission_active = p_mission[current] % MISSIONS.size()
+	p_mission[current] += 1
+	mission_time = MISSION_TIME
+	mission_score = 0
+	mission_shots.clear()
+	if mission_active == 1:
+		_pick_mission_shot("")
+		_pick_mission_shot("")
+	_callout(MISSIONS[mission_active], MISSION_HINT[mission_active], Color(1.0, 0.35, 0.9), 2.5, "big")
+	sfx.play("multiball", -3.0, 1.2)
+	if mission_active == 2:
+		phys.reset_drops()
+
+
+func _end_mission() -> void:
+	_callout("MISSION ENDE", "SUMME " + DisplayScript.fmt(mission_score), Color(1.0, 0.35, 0.9), 2.0)
+	mission_active = -1
+	mission_shots.clear()
+
+
+func _drop_bank_complete() -> void:
+	_add_score(25000)
+	sfx.play("complete")
+	view.flash("right", 0.8)
+	drop_reset_timer = 1.0
+	if mission_active == 2:
+		return
+	if mission_active < 0 and not mission_lit:
+		mission_lit = true
+		_callout("MISSION BEREIT", "SCHIESS AUFS LAUNCH PAD", Color(1.0, 0.35, 0.9), 2.0)
+	else:
+		_callout("TARGETS", "25.000", Color(1.0, 0.75, 0.2), 1.2, "info")
+
+
+func _on_drain() -> void:
+	var remaining: int = phys.balls.size() + serve_queue
+	if ball_save > 0.0 and not tilted:
+		_serve_extra(1)
+		if not multiball:
+			ball_save = 0.0
+		_callout("BALL SAVED", "", Color(0.4, 1.0, 0.6), 1.5, "info")
+		sfx.play("extra", -4.0)
+		return
+	if multiball and remaining <= 1:
+		multiball = false
+		super_lit = false
+		jackpot_shots.clear()
+		_callout("MULTIBALL ENDE", "JACKPOT JETZT " + DisplayScript.fmt(jackpot_value), Color(1.0, 0.5, 0.4), 1.8, "info")
+	if remaining == 0:
+		_end_ball()
 
 
 func _stat(key: String, n: int) -> void:
@@ -366,19 +673,10 @@ func _physics_process(delta: float) -> void:
 		return
 	state_time += delta
 	_update_controls()
-	table.physics_step(delta)
+	phys.physics_step(delta)
 
-	if ball_save > 0.0 and not table.in_lane:
-		ball_save = maxf(0.0, ball_save - delta)
-	orbit_lit = maxf(0.0, orbit_lit - delta)
-	if drop_reset_timer > 0.0:
-		drop_reset_timer -= delta
-		if drop_reset_timer <= 0.0:
-			table.reset_drops()
-	if not messages.is_empty():
-		messages[0]["time"] = float(messages[0]["time"]) - delta
-		if float(messages[0]["time"]) <= 0.0:
-			messages.pop_front()
+	if state == State.PLAYING:
+		_update_rules(delta)
 
 	match state:
 		State.BONUS:
@@ -392,8 +690,46 @@ func _physics_process(delta: float) -> void:
 
 	if autoplay:
 		_check_ball_sane()
-		if OS.has_environment('PB_TRACE') and Engine.get_physics_frames() % 60 == 0:
-			print('t=%.1f st=%s mode=%d pos=%s vel=%s lane=%s ch=%.2f' % [Engine.get_physics_frames()/120.0, State.keys()[state], table.ball_mode, table.ball_pos.round(), table.ball_vel.round(), table.in_lane, table.plunger_charge])
+		if OS.has_environment("PB_TRACE") and Engine.get_physics_frames() % 60 == 0:
+			var desc := []
+			for b in phys.balls:
+				desc.append("%s/%s/%d" % [b.pos.round(), b.vel.round(), b.mode])
+			print("t=%.1f st=%s mb=%s balls=%s" % [Engine.get_physics_frames() / 120.0, State.keys()[state],
+				multiball, desc])
+
+
+func _update_rules(delta: float) -> void:
+	var in_lane: bool = phys.ball_in_plunger()
+	if ball_save > 0.0 and not (in_lane and phys.balls.size() == 1):
+		ball_save = maxf(0.0, ball_save - delta)
+	skill_window = maxf(0.0, skill_window - delta)
+	combo_timer = maxf(0.0, combo_timer - delta)
+	inlane_lit[0] = maxf(0.0, inlane_lit[0] - delta)
+	inlane_lit[1] = maxf(0.0, inlane_lit[1] - delta)
+	upper_timer = maxf(0.0, upper_timer - delta)
+	tilt_level = maxf(0.0, tilt_level - delta * 0.35)
+	if skill_pending and in_lane and int(state_time / 0.6) != int((state_time - delta) / 0.6):
+		skill_lane = (skill_lane + 1) % 3
+	if mission_active >= 0:
+		mission_time -= delta
+		if mission_time <= 0.0:
+			_end_mission()
+	if drop_reset_timer > 0.0:
+		drop_reset_timer -= delta
+		if drop_reset_timer <= 0.0:
+			phys.reset_drops()
+	# Ball-Nachschub (Multiball, Ballretter) mit automatischem Abschuss.
+	serve_timer = maxf(0.0, serve_timer - delta)
+	if serve_queue > 0 and serve_timer <= 0.0 and not phys.lane_occupied():
+		phys.serve_ball()
+		serve_queue -= 1
+		serve_timer = 0.9
+		auto_launch_timer = 0.5
+	if auto_launch > 0 and phys.ball_in_plunger():
+		auto_launch_timer -= delta
+		if auto_launch_timer <= 0.0:
+			auto_launch -= 1
+			phys.launch(_rng.randf_range(0.55, 0.85))
 
 
 func _process(_delta: float) -> void:
@@ -402,7 +738,7 @@ func _process(_delta: float) -> void:
 		get_viewport().get_texture().get_image().save_png(screenshot_path)
 		get_tree().quit()
 	_update_lamps()
-	_update_dmd()
+	_update_display()
 	if state == State.ATTRACT:
 		overlay.queue_redraw()
 
@@ -416,13 +752,13 @@ func _update_controls() -> void:
 			left = true
 		else:
 			right = true
-			if table.ball_in_plunger():
+			if phys.ball_in_plunger() and auto_launch == 0:
 				plunger = true
 	if autoplay:
 		var ai := _autoplay_controls()
 		left = ai.x > 0.5
 		right = ai.y > 0.5
-		plunger = table.ball_in_plunger() and table.plunger_charge < _auto_plunge_target
+		plunger = phys.ball_in_plunger() and auto_launch == 0 and phys.plunger_charge < _auto_plunge_target
 	if state != State.PLAYING:
 		left = false
 		right = false
@@ -440,16 +776,16 @@ func _update_controls() -> void:
 		sfx.play("flipper", -14.0, 0.7)
 	_left_was = left
 	_right_was = right
-	table.set_flipper(0, left)
-	table.set_flipper(1, right)
-	var was_held: bool = table.plunger_held
-	table.set_plunger(plunger)
+	phys.set_flipper(0, left)
+	phys.set_flipper(1, right)
+	var was_held: bool = phys.plunger_held
+	phys.set_plunger(plunger)
 	if autoplay and was_held and not plunger:
-		_auto_plunge_target = _rng.randf_range(0.55, 1.0)
+		_auto_plunge_target = _rng.randf_range(0.1, 1.0)
 
 
 func _rotate_lanes(dir: int) -> void:
-	if lanes[0] and lanes[1] and lanes[2]:
+	if tilted or (lanes[0] and lanes[1] and lanes[2]):
 		return
 	if dir < 0:
 		lanes = [lanes[1], lanes[2], lanes[0]]
@@ -457,97 +793,166 @@ func _rotate_lanes(dir: int) -> void:
 		lanes = [lanes[2], lanes[0], lanes[1]]
 
 
+func _nudge() -> void:
+	if state != State.PLAYING or tilted:
+		return
+	phys.nudge(Vector2(_rng.randf_range(-140, 140), -200))
+	tilt_level += 1.0
+	sfx.play("sling", -8.0, 0.5)
+	if tilt_level > 2.6:
+		tilted = true
+		phys.set_flippers_enabled(false)
+		phys.kickback_lit = false
+		_callout("TILT", "", Color(1.0, 0.15, 0.15), 3.0, "big")
+		sfx.play("over")
+	elif tilt_level > 1.5:
+		_callout("DANGER", "NICHT SO WILD!", Color(1.0, 0.3, 0.2), 1.0, "info")
+
+
 func _update_lamps() -> void:
 	var l := {}
+	var in_lane: bool = phys.ball_in_plunger()
 	for i in 3:
-		l["lane%d" % i] = 1 if lanes[i] else 0
+		if skill_pending and in_lane:
+			l["lane%d" % i] = 3 if i == skill_lane else 0
+		else:
+			l["lane%d" % i] = 1 if lanes[i] else 0
 	for m in range(2, 6):
 		l["mult%d" % m] = 1 if multiplier >= m else 0
 	for i in 3:
-		if i < fuel:
+		if lock_lit or i < fuel:
 			l["fuel%d" % i] = 1
-		elif i == fuel:
-			l["fuel%d" % i] = 2
 		else:
-			l["fuel%d" % i] = 0
-	l["launch"] = 2 if launch_lit else 0
+			l["fuel%d" % i] = 2 if i == fuel and not multiball else 0
+	var locks := p_locks[current] if state == State.PLAYING else 0
+	l["lock0"] = 1 if locks >= 1 else (2 if lock_lit else 0)
+	l["lock1"] = 1 if locks >= 2 else (2 if lock_lit and locks == 1 else 0)
 	l["extra"] = 2 if extra_lit else 0
-	l["orbit"] = 2 if orbit_lit > 0.0 else 0
-	l["save"] = 2 if ball_save > 0.0 or (ball_save_armed and state == State.PLAYING) else (1 if extra_balls > 0 else 0)
-	if state == State.ATTRACT:
-		var phase := int(state_time * 6.0)
+	l["mission_lit"] = 2 if mission_lit else 0
+	for i in 3:
+		if mission_active == i:
+			l["mode%d" % i] = 3
+		elif state == State.PLAYING and p_mission[current] > i:
+			l["mode%d" % i] = 1
+		else:
+			l["mode%d" % i] = 0
+	for i in 3:
+		l["stand%d" % i] = 1 if stand_lit[i] else 0
+	l["kickback"] = 1 if phys.kickback_lit else 0
+	l["special"] = 0
+	l["inlane0"] = 1 if inlane_lit[0] > 0.0 else 0
+	l["inlane1"] = 1 if inlane_lit[1] > 0.0 else 0
+	l["upper"] = 3 if upper_timer > 0.0 else 0
+	l["save"] = 2 if ball_save > 0.0 else (1 if extra_balls > 0 else 0)
+	for key in Layout.SHOTS:
+		l["shot_" + key] = _shot_lamp(key)
+	if state == State.ATTRACT or state == State.GAME_OVER:
+		# Lichtshow: Regenbogen-Welle von unten nach oben.
+		var t := state_time
 		for k in l.keys():
-			l[k] = 1 if (phase + hash(k)) % 4 == 0 else 0
-	table.lamps = l
+			var p: Vector2 = _insert_pos.get(k, Vector2.ZERO)
+			var on := 1 if sin(t * 4.0 + p.y / 160.0 + p.x / 400.0) > 0.55 else 0
+			if k.begins_with("shot_"):
+				l[k] = [on, Color.from_hsv(fmod(t * 0.3 + p.x / 1000.0, 1.0), 0.8, 1.0)]
+			else:
+				l[k] = on
+	if tilted:
+		for k in l.keys():
+			l[k] = 0
+	view.lamps = l
+	# Rampenbeleuchtung je nach Modus.
+	if multiball:
+		view.ramp_color = Color(1.0, 0.2, 0.25)
+	elif mission_active >= 0:
+		view.ramp_color = Color(1.0, 0.3, 0.9)
+	elif lock_lit:
+		view.ramp_color = Color(1.0, 0.65, 0.1)
+	else:
+		view.ramp_color = Color(0.3, 0.9, 1.0)
+	view.rocket_thrust = 0.7 if multiball else (0.25 if lock_lit else 0.0)
 
 
-# ---------------------------------------------------------------- Anzeige
+## Pfeil vor einem Hauptschuss: [Zustand, Farbe].
+func _shot_lamp(key: String) -> Array:
+	if state != State.PLAYING:
+		return [0, Color.WHITE]
+	if multiball:
+		if key == "scoop" and super_lit:
+			return [3, Color(1.0, 0.25, 0.9)]
+		if jackpot_shots.has(key):
+			return [3, Color(1.0, 0.15, 0.2)]
+		return [0, Color.RED]
+	if mission_active == 1 and mission_shots.has(key):
+		return [3, Color(1.0, 0.3, 0.9)]
+	match key:
+		"scoop":
+			if lock_lit:
+				return [2, Color(1.0, 0.6, 0.1)]
+			if mission_lit:
+				return [2, Color(1.0, 0.3, 0.9)]
+			if extra_lit:
+				return [2, Color(1.0, 0.85, 0.2)]
+			if upper_timer > 0.0:
+				return [3, Color(0.2, 0.95, 1.0)]
+		"lramp", "rramp":
+			if not lock_lit:
+				return [2, Color(0.25, 1.0, 0.4)]
+		"lorb":
+			if combo_timer > 0.0 and combo_last != "lorb":
+				return [2, Color(0.2, 0.95, 1.0)]
+		"pocket":
+			if mission_active == 2:
+				return [3, Color(1.0, 0.3, 0.9)]
+			return [1, Color(0.2, 0.7, 1.0)]
+	if combo_timer > 0.0 and combo_last != key:
+		return [2, Color(0.2, 0.95, 1.0)]
+	return [0, Color.WHITE]
 
-static func _fmt(n: int) -> String:
-	var s := str(absi(n))
-	var out := ""
-	while s.length() > 3:
-		out = "." + s.substr(s.length() - 3) + out
-		s = s.substr(0, s.length() - 3)
-	return ("-" if n < 0 else "") + s + out
 
-
-func _update_dmd() -> void:
-	dmd.clear()
-	var blink := fmod(state_time, 0.4) < 0.2
+func _update_display() -> void:
+	var info := {"highscores": highscores, "scores": scores, "player": current}
 	match state:
 		State.ATTRACT:
-			var page := int(state_time / 4.0) % 3
-			if page == 0:
-				dmd.text_center(2, "LIFTOFF", 2)
-				dmd.text_center(20, "A PINBALL DREAM")
-			elif page == 1:
-				dmd.text_center(0, "HIGH SCORES")
-				for i in mini(3, highscores.size()):
-					dmd.text(14, 9 + i * 8, "%d." % (i + 1), 1, 2)
-					dmd.text_right(114, 9 + i * 8, _fmt(highscores[i]))
-				if highscores.is_empty():
-					dmd.text_center(16, "NOCH KEINE", 1, 2)
-			else:
-				dmd.text_center(2, "PRESS START", 1, 3 if blink else 1)
-				dmd.text_center(12, "TIPPE 1-4 SPIELER")
-				dmd.text_center(22, "ODER TASTE 1-4", 1, 2)
+			info["mode"] = "attract"
 		State.GAME_OVER:
-			dmd.text_center(0, "GAME OVER", 1, 3)
-			if num_players == 1:
-				dmd.text_center(11, _fmt(scores[0]), 2)
-			else:
-				for i in num_players:
-					var x := 2 + (i % 2) * 64
-					var y := 10 + (i / 2) * 11
-					dmd.text(x, y, "%d" % (i + 1), 1, 1)
-					dmd.text_right(x + 62, y, _fmt(scores[i]))
+			info["mode"] = "over"
+			info["new_high"] = new_high
 		State.BONUS:
-			dmd.text_center(0, "BONUS", 1)
-			dmd.headline(10, "%s X %d" % [_fmt(bonus), multiplier])
-			dmd.text_center(25, "= " + _fmt(bonus * multiplier), 1, 2)
+			info["mode"] = "bonus"
+			info["bonus"] = bonus
+			info["mult"] = multiplier
 		State.PLAYING:
+			info["mode"] = "game"
+			info["score"] = scores[current]
+			info["ball"] = ball_no[current]
+			info["mult"] = multiplier
+			info["tilt_warn"] = tilt_level > 1.5 and not tilted
 			if paused:
-				dmd.headline(8, "PAUSE")
-				return
-			if not messages.is_empty():
-				var m: Dictionary = messages[0]
-				var flash := float(m["time"]) > 0.6 or blink
-				dmd.headline(3 if m["sub"] != "" else 9, str(m["title"]), 3 if flash else 2)
-				if m["sub"] != "":
-					dmd.text_center(23, str(m["sub"]), 1, 2)
-				return
-			dmd.text(1, 0, "PLAYER %d" % (current + 1), 1, 2)
-			dmd.text_right(127, 0, "BALL %d" % ball_no[current], 1, 2)
-			dmd.text_center(9, _fmt(scores[current]), 2)
-			var status := "FUEL %d/3" % fuel
-			if launch_lit:
-				status = "JACKPOT " + _fmt(jackpot_value)
+				info["status"] = "PAUSE"
+			elif multiball:
+				info["status"] = "MULTIBALL – ROTE PFEILE = " + DisplayScript.fmt(jackpot_value)
+				info["status_color"] = Color(1.0, 0.4, 0.4)
+				if super_lit:
+					info["status"] = "SUPER JACKPOT AM LAUNCH PAD!"
+			elif mission_active >= 0:
+				info["status"] = "%s  %ds" % [MISSIONS[mission_active], ceili(mission_time)]
+				info["status_color"] = Color(1.0, 0.4, 0.9)
+				info["bar"] = mission_time / MISSION_TIME
 			elif ball_save > 0.0:
-				status = "BALL SAVE %d" % ceili(ball_save)
-			dmd.text(1, 25, status, 1, 2)
-			dmd.text_right(127, 25, "%dX" % multiplier, 1, 2)
+				info["status"] = "BALL SAVE"
+				info["status_color"] = Color(1.0, 0.8, 0.3)
+				info["bar"] = ball_save / BALL_SAVE_TIME
+			elif lock_lit:
+				info["status"] = "LOCK IS LIT – LAUNCH PAD"
+				info["status_color"] = Color(1.0, 0.7, 0.2)
+			else:
+				info["status"] = "TREIBSTOFF %d/3   LOCKS %d/2" % [fuel, p_locks[current]]
+				info["status_color"] = Color(0.5, 1.0, 0.6)
+				info["bar"] = fuel / 3.0
+	display.info = info
 
+
+# ---------------------------------------------------------------- Overlay (Startbildschirm)
 
 func _player_buttons() -> Array[Rect2]:
 	var out: Array[Rect2] = []
@@ -568,25 +973,37 @@ func _draw_overlay() -> void:
 	if state != State.ATTRACT:
 		return
 	var font := ThemeDB.fallback_font
-	overlay.draw_rect(Rect2(80, 1250, 780, 360), Color(0.0, 0.0, 0.05, 0.75))
-	overlay.draw_rect(Rect2(80, 1250, 780, 360), Color(0.35, 0.85, 1.0, 0.8), false, 3.0)
+	var panel := StyleBoxFlat.new()
+	panel.bg_color = Color(0.02, 0.02, 0.08, 0.82)
+	panel.border_color = Color(0.35, 0.85, 1.0, 0.9)
+	panel.set_border_width_all(3)
+	panel.set_corner_radius_all(22)
+	overlay.draw_style_box(panel, Rect2(80, 1250, 780, 360))
 	overlay.draw_string(font, Vector2(80, 1305), "SPIELER WÄHLEN", HORIZONTAL_ALIGNMENT_CENTER, 780, 36,
-		Color(1.0, 0.75, 0.25))
+		Color(1.0, 0.8, 0.3))
 	var pulse := 0.6 + 0.4 * sin(state_time * 4.0)
+	var btn := StyleBoxFlat.new()
+	btn.bg_color = Color(0.1, 0.15, 0.4, 0.95)
+	btn.border_color = Color(0.35, 0.85, 1.0, pulse)
+	btn.set_border_width_all(3)
+	btn.set_corner_radius_all(16)
 	var buttons := _player_buttons()
 	for i in buttons.size():
 		var r := buttons[i]
-		overlay.draw_rect(r, Color(0.1, 0.15, 0.35, 0.9))
-		overlay.draw_rect(r, Color(0.35, 0.85, 1.0, pulse), false, 3.0)
-		overlay.draw_string(font, r.position + Vector2(0, 80), str(i + 1), HORIZONTAL_ALIGNMENT_CENTER,
+		overlay.draw_style_box(btn, r)
+		overlay.draw_string(font, r.position + Vector2(0, 82), str(i + 1), HORIZONTAL_ALIGNMENT_CENTER,
 			r.size.x, 72, Color.WHITE)
 		overlay.draw_string(font, r.position + Vector2(0, 115), "SPIELER", HORIZONTAL_ALIGNMENT_CENTER,
 			r.size.x, 18, Color(0.7, 0.85, 1.0))
+	var btn2 := StyleBoxFlat.new()
+	btn2.bg_color = Color(0.15, 0.08, 0.25, 0.95)
+	btn2.border_color = Color(1.0, 0.5, 0.9, 0.8)
+	btn2.set_border_width_all(2)
+	btn2.set_corner_radius_all(14)
 	for pair in [[_rotate_button(), "ANSICHT DREHEN (%d°)" % rotation_deg],
 			[_music_button(), "MUSIK: " + ("AN" if music_on else "AUS")]]:
 		var r: Rect2 = pair[0]
-		overlay.draw_rect(r, Color(0.12, 0.1, 0.25, 0.9))
-		overlay.draw_rect(r, Color(1.0, 0.6, 0.9, 0.7), false, 2.0)
+		overlay.draw_style_box(btn2, r)
 		overlay.draw_string(font, r.position + Vector2(0, 50), pair[1], HORIZONTAL_ALIGNMENT_CENTER,
 			r.size.x, 24, Color.WHITE)
 
@@ -611,7 +1028,7 @@ func _pointer_down(index: int, screen_pos: Vector2) -> void:
 			elif _music_button().has_point(p):
 				_toggle_music()
 		State.PLAYING, State.BONUS:
-			touches[index] = "L" if p.x < TableScript.CENTER_X else "R"
+			touches[index] = "L" if p.x < Phys.CENTER_X else "R"
 
 
 func _pointer_up(index: int) -> void:
@@ -675,9 +1092,8 @@ func _key(e: InputEventKey) -> void:
 		KEY_P:
 			if state == State.PLAYING:
 				paused = not paused
-		KEY_N:
-			if state == State.PLAYING:
-				table.nudge(Vector2(_rng.randf_range(-120, 120), -180))
+		KEY_N, KEY_UP:
+			_nudge()
 		KEY_F11:
 			var fs := DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN
 			DisplayServer.window_set_mode(
@@ -687,43 +1103,40 @@ func _key(e: InputEventKey) -> void:
 				get_tree().quit()
 			else:
 				paused = false
-				table.remove_ball()
-				messages.clear()
+				phys.clear_balls()
+				display.clear_callouts()
 				_set_state(State.ATTRACT)
 
 
 # ---------------------------------------------------------------- Autoplay
 
-## Einfacher Bot: flippert, wenn der Ball über einem Flipper ist. Liefert
-## (links, rechts) als Vector2 mit 0/1.
+## Einfacher Bot für Tests und Demo: flippert, wenn ein Ball über einem
+## Flipper ist. Liefert (links, rechts) als Vector2 mit 0/1.
 func _autoplay_controls() -> Vector2:
 	var out := Vector2.ZERO
-	if table.ball_mode != table.BallMode.FREE:
-		return out
-	var p: Vector2 = table.ball_pos
-	var v: Vector2 = table.ball_vel
-	var pulse := fmod(table.time, 0.9) < 0.2
-	if p.y > 1490.0 and p.y < 1640.0 and (v.y > 40.0 or pulse):
-		if p.x < TableScript.CENTER_X and p.x > 300.0:
-			out.x = 1.0
-		elif p.x >= TableScript.CENTER_X and p.x < 640.0:
-			out.y = 1.0
+	var pulse := fmod(phys.time, 0.9) < 0.2
+	for b in phys.balls:
+		if b.mode != Phys.Mode.FREE:
+			continue
+		var p: Vector2 = b.pos
+		var v: Vector2 = b.vel
+		if p.y > 1490.0 and p.y < 1640.0 and (v.y > 40.0 or pulse):
+			if p.x < Phys.CENTER_X and p.x > 300.0:
+				out.x = 1.0
+			elif p.x >= Phys.CENTER_X and p.x < 640.0:
+				out.y = 1.0
 	return out
 
 
 func _check_ball_sane() -> void:
-	if table.ball_mode == table.BallMode.NONE:
-		return
-	var p: Vector2 = table.ball_pos
-	if p.x < 20.0 or p.x > 980.0 or p.y < 0.0:
-		push_error("Ball hat den Tisch verlassen: %s" % p)
-		_stat("escaped", 1)
-		table.remove_ball()
-		_end_ball()
+	for b in phys.balls:
+		if b.pos.x < 20.0 or b.pos.x > 980.0 or b.pos.y < 0.0:
+			push_error("Ball hat den Tisch verlassen: %s" % b.pos)
+			_stat("escaped", 1)
+			b.pos = Vector2(470, 1700)
 
 
 func _exit_tree() -> void:
 	if autoplay:
-		var sc := scores.duplicate()
 		print("[autoplay] Statistik: ", _stats)
-		print("[autoplay] Punkte: ", sc, " Status: ", State.keys()[state])
+		print("[autoplay] Punkte: ", scores, " Status: ", State.keys()[state])

@@ -124,6 +124,22 @@ func _build_effects() -> void:
 		st[0] += TAU * lerpf(700.0, 70.0, t / 0.9) / RATE
 		return (1.0 if sin(st[0]) > 0.0 else -1.0) * 0.22 * (1.0 - t / 0.9))
 
+	streams["spinner"] = _make(0.05, func(t: float, st: Array) -> float:
+		st[0] += TAU * 2600.0 / RATE
+		return (1.0 if sin(st[0]) > 0.0 else -1.0) * 0.25 * exp(-t * 90.0) + _noise() * exp(-t * 120.0) * 0.3)
+
+	streams["kickback"] = _make(0.35, func(t: float, st: Array) -> float:
+		st[0] += TAU * lerpf(90.0, 40.0, t / 0.35) / RATE
+		return sin(st[0]) * exp(-t * 8.0) * 0.9 + _noise() * exp(-t * 30.0) * 0.5)
+
+	streams["multiball"] = _make(1.6, func(t: float, st: Array) -> float:
+		var f := lerpf(110.0, 880.0, minf(t / 1.2, 1.0))
+		st[0] += TAU * f / RATE
+		st[1] += TAU * f * 1.5 / RATE
+		var env := minf(t * 8.0, 1.0) * (1.0 - t / 1.6)
+		var sq := 1.0 if sin(st[0]) > 0.0 else -1.0
+		return (sq * 0.18 + sin(st[1]) * 0.2 + _noise() * 0.08) * env)
+
 	streams["jackpot"] = _arpeggio([72, 76, 79, 84, 88, 91, 96], 0.09, 0.3)
 	streams["extra"] = _arpeggio([67, 72, 76, 79, 84, 79, 84], 0.08, 0.28)
 	streams["start"] = _arpeggio([60, 64, 67, 72], 0.1, 0.25)
