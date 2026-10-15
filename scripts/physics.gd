@@ -25,6 +25,9 @@ const BALL_R := 14.0
 const GRAVITY := 2300.0
 const SUBSTEPS := 8
 const MAX_SPEED := 4200.0
+## Geringer Rollwiderstand: ~3 % Geschwindigkeitsverlust pro Sekunde, egal ob
+## die Kugel frei rollt oder an einer Wand, einem Flipper oder einer Führung.
+const ROLL_DAMPING_STEP := 0.99996
 const BUMPER_KICK := 1050.0
 const SLING_KICK := 900.0
 const TRACK_SPEED := 1500.0
@@ -524,6 +527,7 @@ func physics_step(delta: float) -> void:
 				continue
 			var prev := b.pos
 			b.vel.y += GRAVITY * dt
+			b.vel *= ROLL_DAMPING_STEP
 			var sp := b.vel.length()
 			if sp > MAX_SPEED:
 				b.vel *= MAX_SPEED / sp
@@ -584,9 +588,13 @@ func _resolve(b: Ball, n: Vector2, pen: float, rest: float, surf_vel := Vector2.
 	var vn := rel.dot(n)
 	if vn >= 0.0:
 		return 0.0
-	var e := rest if -vn > 60.0 else 0.0
+	# Echter Stoß: Rückprall und etwas Reibung. Rollender Kontakt (kleine
+	# Normalgeschwindigkeit, passiert in jedem Substep): keine Reibung, sonst
+	# bremst jede Wand die Kugel auf eine künstliche Endgeschwindigkeit ab.
+	var impact := -vn > 60.0
+	var e := rest if impact else 0.0
 	var vt := rel - n * vn
-	rel = vt * 0.995 - n * vn * e
+	rel = vt * (0.97 if impact else 1.0) - n * vn * e
 	b.vel = rel + surf_vel
 	return -vn
 
