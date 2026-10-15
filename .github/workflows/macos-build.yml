@@ -1,0 +1,73 @@
+name: macOS Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.7.2"
+  GODOT_FLAVOR: "stable"
+
+jobs:
+  export-macos:
+    name: Export macOS app
+    # Der macOS-Export klappt auch auf Linux (inkl. Ad-hoc-Signatur) und ist dort deutlich günstiger.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache Godot and export templates
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/godot
+            ~/.local/share/godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.GODOT_FLAVOR }}-macos
+
+      - name: Download Godot and macOS export template
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          base="https://downloads.godotengine.org/?version=${GODOT_VERSION}&flavor=${GODOT_FLAVOR}"
+          mkdir -p ~/godot
+          curl -fsSL -o /tmp/godot.zip "${base}&slug=linux.x86_64.zip&platform=linux.64"
+          unzip -q /tmp/godot.zip -d ~/godot
+          mv ~/godot/Godot_v*_linux.x86_64 ~/godot/godot
+          curl -fsSL -o /tmp/templates.tpz "${base}&slug=export_templates.tpz&platform=templates"
+          tpl_dir=~/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_FLAVOR}
+          mkdir -p "$tpl_dir"
+          unzip -q -j /tmp/templates.tpz templates/macos.zip templates/version.txt -d "$tpl_dir"
+          rm /tmp/godot.zip /tmp/templates.tpz
+
+      - name: Import project
+        run: ~/godot/godot --headless --path . --import
+
+      - name: Smoke test (bot plays 60 s)
+        run: |
+          set -o pipefail
+          ~/godot/godot --headless --path . --fixed-fps 120 --quit-after 7200 -- --autoplay 2>&1 | tee smoke.log
+          if grep -q "SCRIPT ERROR" smoke.log; then
+            echo "::error::Script errors during smoke test"
+            exit 1
+          fi
+
+      - name: Export macOS app
+        run: |
+          set -euo pipefail
+          mkdir -p build/macos
+          ~/godot/godot --headless --path . --export-release "macOS" build/macos/Liftoff.zip
+          test -s build/macos/Liftoff.zip
+          unzip -l build/macos/Liftoff.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: Liftoff-macOS
+          path: build/macos/Liftoff.zip
+          if-no-files-found: error

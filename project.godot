@@ -30,6 +30,8 @@ common/max_physics_steps_per_frame=8
 
 [rendering]
 
+textures/vram_compression/import_etc2_astc=true
+
 limits/opengl/max_lights_per_object=16
 lights_and_shadows/directional_shadow/size=4096
 

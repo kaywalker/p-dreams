@@ -109,6 +109,22 @@ godot --headless --path . --fixed-fps 120 --quit-after 36000 -- --autoplay
 Der Bot spielt 5 Minuten Spielzeit und gibt am Ende eine Ereignis-Statistik aus. Mit der
 Umgebungsvariable `PB_TRACE=1` wird zusätzlich jede halbe Sekunde die Ballposition protokolliert.
 
+## macOS-Build (GitHub Actions)
+
+Der Workflow `.github/workflows/macos-build.yml` baut bei jedem Push (und manuell über *Actions → macOS Build →
+Run workflow*) eine universelle macOS-App für Intel und Apple Silicon:
+
+1. lädt Godot 4.7.2 und das macOS-Export-Template von godotengine.org (gecacht),
+2. lässt den Autoplay-Bot 60 s spielen und bricht bei Skriptfehlern ab,
+3. exportiert mit dem Preset „macOS“ aus `export_presets.cfg` und lädt `Liftoff.zip` als Artefakt
+   **Liftoff-macOS** hoch (zu finden auf der Seite des Workflow-Laufs).
+
+Die App ist nur **ad-hoc signiert**, nicht notarisiert. Beim ersten Start meldet macOS deshalb, dass die
+App nicht geprüft werden kann. Abhilfe: Rechtsklick auf die App → *Öffnen*, oder im Terminal
+`xattr -dr com.apple.quarantine "Liftoff - Pinball Dreams Tribute.app"`. Für eine Verteilung ohne Warnung
+braucht es ein Apple-Developer-Zertifikat und Notarisierung (in `export_presets.cfg` unter `codesign/*` und
+`notarization/*`).
+
 ## Export für den Tisch
 
 In Godot unter *Projekt → Exportieren* eine Vorlage für das Betriebssystem des Gaming-Tables
