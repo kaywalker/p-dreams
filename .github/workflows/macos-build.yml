@@ -57,6 +57,9 @@ jobs:
             exit 1
           fi
 
+      - name: Rest test (ball never gets stuck)
+        run: ~/godot/godot --headless --path . --script tests/rest_test.gd
+
       - name: Export macOS app
         run: |
           set -euo pipefail

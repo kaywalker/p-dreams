@@ -133,18 +133,41 @@ class Track:
 	var lengths := PackedFloat32Array()
 	var total := 0.0
 	var exit_vel: Vector2
-	## Bis zu diesem Punktindex Kunststofframpe, danach Drahtbahn.
-	var plastic_until: int
+	## Bis zu dieser Strecke Kunststofframpe, danach Drahtbahn.
+	var plastic_end := 0.0
 
-	func _init(name_: String, points_: PackedVector3Array, exit_vel_: Vector2, plastic_until_: int) -> void:
+	## `ctrl` sind Stützpunkte; die Bahn wird als Catmull-Rom-Spline fein
+	## abgetastet, damit Kurven rund statt eckig sind.
+	func _init(name_: String, ctrl: PackedVector3Array, exit_vel_: Vector2, plastic_until: int) -> void:
 		name = name_
-		points = points_
 		exit_vel = exit_vel_
-		plastic_until = plastic_until_
+		points = PackedVector3Array()
+		var plastic_index := 0
+		for i in ctrl.size() - 1:
+			var p0 := ctrl[maxi(i - 1, 0)]
+			var p1 := ctrl[i]
+			var p2 := ctrl[i + 1]
+			var p3 := ctrl[mini(i + 2, ctrl.size() - 1)]
+			var n := maxi(2, int(p1.distance_to(p2) / 10.0))
+			if i == plastic_until:
+				plastic_index = points.size()
+			for k in n:
+				var t := float(k) / n
+				points.append(_catmull(p0, p1, p2, p3, t))
+		points.append(ctrl[ctrl.size() - 1])
+		if plastic_until >= ctrl.size() - 1:
+			plastic_index = points.size() - 1
 		lengths.append(0.0)
 		for i in range(1, points.size()):
 			total += points[i - 1].distance_to(points[i])
 			lengths.append(total)
+		plastic_end = lengths[plastic_index]
+
+	static func _catmull(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3, t: float) -> Vector3:
+		var t2 := t * t
+		var t3 := t2 * t
+		return 0.5 * ((2.0 * p1) + (-p0 + p2) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+			+ (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
 
 	func point(dist: float) -> Vector3:
 		for i in range(1, lengths.size()):
@@ -193,6 +216,8 @@ var plunger_held := false
 var spinner_angle := 0.0
 var spinner_speed := 0.0
 var kickback_lit := false
+## Liegt ein Ball zu lange still, wird er angestupst (für Tests abschaltbar).
+var auto_unstick := true
 var time := 0.0
 
 var _gate_side := 1.0
@@ -221,6 +246,18 @@ func _circ(c: Vector2, r: float, kind := "post", rest := 0.55, id := 0) -> Circ:
 	var o := Circ.new(c, r, kind, rest, id)
 	circles.append(o)
 	return o
+
+
+## Kreisbogen aus kurzen Wandstücken (Winkel in Bogenmaß, Bildschirmkoordinaten).
+func _arc(center: Vector2, r: float, a0: float, a1: float, style := "metal", rest := 0.4) -> void:
+	# Gerade Anzahl: am Scheitel liegt eine Spitze statt eines waagerechten Stücks.
+	var steps := maxi(4, int(absf(a1 - a0) * r / 12.0))
+	steps += steps % 2
+	var prev := center + Vector2.from_angle(a0) * r
+	for i in range(1, steps + 1):
+		var p := center + Vector2.from_angle(lerpf(a0, a1, float(i) / steps)) * r
+		_wall(prev, p, style, "wall", rest)
+		prev = p
 
 
 func _sensor(r: Rect2, id: String, num := 0) -> void:
@@ -266,8 +303,14 @@ func _build() -> void:
 	# Out-/Inlane-Führungen und Slingshots (links bauen, rechts spiegeln).
 	for side in 2:
 		var f := func(v: Vector2) -> Vector2: return v if side == 0 else _m(v)
-		_wall(f.call(Vector2(95, 1240)), f.call(Vector2(95, 1440)), "metal")
-		_wall(f.call(Vector2(95, 1440)), f.call(Vector2(337, 1561)), "metal")
+		# Outlane-Wand und Inlane-Führung mit gerundetem Übergang.
+		_wall(f.call(Vector2(95, 1240)), f.call(Vector2(95, 1415)), "metal")
+		var fc: Vector2 = f.call(Vector2(135, 1415.3))
+		if side == 0:
+			_arc(fc, 40.0, PI, deg_to_rad(116.6))
+		else:
+			_arc(fc, 40.0, 0.0, deg_to_rad(63.4))
+		_wall(f.call(Vector2(117.1, 1451.1)), f.call(Vector2(337, 1561)), "metal")
 		_circ(f.call(Vector2(95, 1240)), 6.0, "post")
 		var a: Vector2 = f.call(Vector2(165, 1300))
 		var b: Vector2 = f.call(Vector2(165, 1420))
@@ -301,35 +344,40 @@ func _build() -> void:
 		_sensor(Rect2(368 + 80 * i, 315, 44, 40), "lane", i)
 
 	# Linke Rampe (Trichter), führt auf den oberen Flipper.
-	_wall(Vector2(160, 945), Vector2(172, 760), "ramp")
-	_wall(Vector2(252, 945), Vector2(242, 760), "ramp")
-	_wall(Vector2(172, 760), Vector2(242, 760), "ramp", "wall", 0.25)
-	_sensor(Rect2(180, 775, 56, 30), "ramp", 0)
+	_wall(Vector2(160, 945), Vector2(172, 775), "ramp")
+	_wall(Vector2(252, 945), Vector2(242, 775), "ramp")
+	_arc(Vector2(207, 775), 35.0, PI, TAU, "ramp", 0.25)
+	_sensor(Rect2(180, 790, 56, 30), "ramp", 0)
 
 	# Rechte Rampe (Trichter), führt in die linke Inlane.
-	_wall(Vector2(628, 985), Vector2(640, 790), "ramp")
-	_wall(Vector2(732, 985), Vector2(720, 790), "ramp")
-	_wall(Vector2(640, 790), Vector2(720, 790), "ramp", "wall", 0.25)
-	_sensor(Rect2(645, 805, 70, 30), "ramp", 1)
+	_wall(Vector2(628, 985), Vector2(640, 800), "ramp")
+	_wall(Vector2(732, 985), Vector2(720, 800), "ramp")
+	_arc(Vector2(680, 800), 40.0, PI, TAU, "ramp", 0.25)
+	_sensor(Rect2(645, 812, 70, 30), "ramp", 1)
 
 	# Schräge Drop-Target-Bank zwischen linker Rampe und Scoop.
-	var p0 := Vector2(280, 900)
+	var p0 := Vector2(295, 892)
 	var dir := (Vector2(400, 830) - p0).normalized()
 	for i in 3:
 		var a := p0 + dir * (i * 46.0)
 		drops.append(_wall(a, a + dir * 38.0, "drop", "drop", 0.3, 5.0, i))
 
 	# Scoop "Launch Pad" mit Gasse.
-	_wall(Vector2(428, 905), Vector2(434, 800), "metal")
-	_wall(Vector2(512, 905), Vector2(506, 800), "metal")
-	_wall(Vector2(434, 800), Vector2(506, 800), "metal", "wall", 0.2)
+	_wall(Vector2(428, 905), Vector2(434, 805), "metal")
+	_wall(Vector2(512, 905), Vector2(506, 805), "metal")
+	_arc(Vector2(470, 805), 36.0, PI, TAU, "metal", 0.2)
 	_circ(Vector2(428, 905), 6.0, "post")
 	_circ(Vector2(512, 905), 6.0, "post")
 
 	# Standup-Tasche zwischen Scoop und rechter Rampe.
+	# Schräg gestellt und direkt am Scoop-Bogen angesetzt, damit kein Ball oben
+	# liegen bleibt; rechts offen.
+	var s0 := Vector2(470, 805) + Vector2.from_angle(deg_to_rad(-50.0)) * 36.0
+	var sdir := (Vector2(594, 816) - s0).normalized()
+	_wall(s0, s0 + sdir * 20.0, "metal", "wall", 0.3)
 	for i in 3:
-		var x := 520.0 + 36.0 * i
-		standups.append(_wall(Vector2(x, 790), Vector2(x + 30, 790), "standup", "standup", 0.35, 5.0, i))
+		var a := s0 + sdir * (22.0 + 30.0 * i)
+		standups.append(_wall(a, a + sdir * 26.0, "standup", "standup", 0.35, 5.0, i))
 
 	# Geführte Bahnen.
 	tracks["ramp_left"] = Track.new("ramp_left", PackedVector3Array([
@@ -521,7 +569,7 @@ func _check_stuck(b: Ball, delta: float) -> void:
 	for f in flippers:
 		if f.pressed and b.pos.distance_to(f.pivot) < f.length + 30.0:
 			cradled = true
-	if b.vel.length() < 8.0 and not _on_plunger(b) and not cradled:
+	if auto_unstick and b.vel.length() < 8.0 and not _on_plunger(b) and not cradled:
 		b.stuck += delta
 		if b.stuck > 3.0:
 			b.vel += Vector2(_rng.randf_range(-250, 250), -500)

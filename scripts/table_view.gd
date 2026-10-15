@@ -177,6 +177,18 @@ func _prism(poly: PackedVector2Array, h0: float, h1: float, sides := true) -> Ar
 	return st.commit()
 
 
+## Umriss einer Kapsel (Strecke mit halbrunden Enden) als Polygon.
+func _capsule_poly(a: Vector2, b: Vector2, r: float, seg := 8) -> PackedVector2Array:
+	var dir := (b - a).normalized() if b != a else Vector2.RIGHT
+	var base := dir.angle()
+	var pts := PackedVector2Array()
+	for i in seg + 1:
+		pts.append(b + Vector2.from_angle(base - PI / 2 + PI * i / seg) * r)
+	for i in seg + 1:
+		pts.append(a + Vector2.from_angle(base + PI / 2 + PI * i / seg) * r)
+	return pts
+
+
 ## Quader entlang einer Strecke (für Wände).
 func _seg_box(a: Vector2, b: Vector2, thick: float, h0: float, h1: float, mat: Material) -> MeshInstance3D:
 	var d := b - a
@@ -312,11 +324,13 @@ func _build_walls() -> void:
 	for w in phys.walls:
 		match w.style:
 			"metal", "plastic", "ramp":
+				# Abgerundete Profile (Kapseln): Bögen und Ecken wirken weich statt kantig.
 				var h := 42.0 if w.style != "plastic" else 30.0
-				_seg_box(w.a, w.b, w.thick, 0, h, _wall_mat(w.style))
+				var mat := _wall_mat(w.style)
+				_add(_prism(_capsule_poly(w.a, w.b, w.thick), 0, h), mat, Vector3.ZERO)
 				if w.style == "metal":
-					_add(_cyl(w.thick, w.thick, h), _m_metal, v3(w.a, h * 0.5))
-					_add(_cyl(w.thick, w.thick, h), _m_metal, v3(w.b, h * 0.5))
+					# Gerundete Oberkante als dünner Chromwulst.
+					_add(_prism(_capsule_poly(w.a, w.b, w.thick * 0.55), h, h + 3.0), _m_chrome, Vector3.ZERO)
 			"wood":
 				_seg_box(w.a, w.b, w.thick, 0, 70, _m_wood)
 			"gate":
@@ -434,9 +448,11 @@ func _build_drops() -> void:
 	for t in phys.standups:
 		var m := _mat(Color(0.2, 0.9, 1.0), 0.0, 0.3, Color(0.2, 0.9, 1.0), 0.3)
 		var box := BoxMesh.new()
-		box.size = Vector3((t.b.x - t.a.x) * S, 0.38, 0.06)
-		_add(box, m, v3((t.a + t.b) * 0.5, 19))
-		_add(_cyl(2, 2, 40), _m_metal, v3((t.a + t.b) * 0.5 + Vector2(0, -8), 20))
+		box.size = Vector3((t.b - t.a).length() * S, 0.38, 0.06)
+		var mi := _add(box, m, v3((t.a + t.b) * 0.5, 19))
+		mi.rotation.y = -atan2(t.b.y - t.a.y, t.b.x - t.a.x)
+		var back: Vector2 = (t.a + t.b) * 0.5 + (t.b - t.a).normalized().orthogonal() * 8.0
+		_add(_cyl(2, 2, 40), _m_metal, v3(back, 20))
 		_standup_mats.append(m)
 
 
@@ -447,7 +463,7 @@ func _build_tracks() -> void:
 	_rail_mats.append(rail_mat)
 	for key in phys.tracks:
 		var tr = phys.tracks[key]
-		var plastic_end: float = tr.lengths[tr.plastic_until]
+		var plastic_end: float = tr.plastic_end
 		var st := SurfaceTool.new()
 		st.begin(Mesh.PRIMITIVE_TRIANGLES)
 		var rails := SurfaceTool.new()

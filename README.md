@@ -103,6 +103,14 @@ Für schwächere Hardware gibt es `--low` (ohne MSAA, geringere 3D-Auflösung).
 ## Testen ohne Bildschirm
 
 ```sh
+godot --headless --path . --script tests/rest_test.gd
+```
+
+Prüft, dass der Ball nirgends liegen bleiben kann: Von über 1.300 Startpunkten aus wird je ein Ball
+fallen gelassen; jede Stelle, an der er still liegen bleibt (außer Plunger und Scoop), wird gemeldet und
+lässt den Test fehlschlagen. Alle Oberkanten sind deshalb gewölbt oder geneigt.
+
+```sh
 godot --headless --path . --fixed-fps 120 --quit-after 36000 -- --autoplay
 ```
 

@@ -52,7 +52,7 @@ static func inserts() -> Array[Dictionary]:
 		out.append({"key": "mode%d" % i, "pos": Vector2(400 + 70 * i, 1150), "shape": "circle",
 			"size": 12.0, "color": MAGENTA, "label": modes[i]})
 	for i in 3:
-		out.append({"key": "stand%d" % i, "pos": Vector2(535 + 36 * i, 830), "shape": "circle",
+		out.append({"key": "stand%d" % i, "pos": Vector2(527 + 28.0 * i, 823 + 10.7 * i), "shape": "circle",
 			"size": 9.0, "color": CYAN})
 	out.append({"key": "kickback", "pos": Vector2(67, 1450), "shape": "circle", "size": 11.0,
 		"color": RED, "label": "KICK"})
