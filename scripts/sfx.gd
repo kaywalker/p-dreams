@@ -15,6 +15,7 @@ var _pool: Array[AudioStreamPlayer] = []
 var _next := 0
 var _music: AudioStreamPlayer
 var _rng := RandomNumberGenerator.new()
+var _music_task := -1
 
 
 func _ready() -> void:
@@ -27,7 +28,7 @@ func _ready() -> void:
 	add_child(_music)
 	music_on = music_on
 	_build_effects()
-	WorkerThreadPool.add_task(_build_music_threaded)
+	_music_task = WorkerThreadPool.add_task(_build_music_threaded)
 
 
 func play(name: String, volume_db := 0.0, pitch := 1.0) -> void:
@@ -221,6 +222,13 @@ func _build_music_threaded() -> void:
 		out[i] = bass_v + arp_v + lead_v + drum
 	var wav := _to_wav(out, true)
 	call_deferred("_music_ready", wav)
+
+
+func _exit_tree() -> void:
+	# Musik-Thread abwarten, sonst greift er nach dem Beenden ins Leere.
+	if _music_task >= 0:
+		WorkerThreadPool.wait_for_task_completion(_music_task)
+		_music_task = -1
 
 
 func _music_ready(wav: AudioStreamWAV) -> void:

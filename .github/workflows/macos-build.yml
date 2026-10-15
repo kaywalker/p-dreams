@@ -57,6 +57,9 @@ jobs:
             exit 1
           fi
 
+      - name: Input test (flipper keys and touch)
+        run: ~/godot/godot --headless --path . --script tests/input_test.gd -- --no-music
+
       - name: Rest test (ball never gets stuck)
         run: ~/godot/godot --headless --path . --script tests/rest_test.gd
 

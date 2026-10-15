@@ -111,6 +111,14 @@ fallen gelassen; jede Stelle, an der er still liegen bleibt (außer Plunger und 
 lässt den Test fehlschlagen. Alle Oberkanten sind deshalb gewölbt oder geneigt.
 
 ```sh
+godot --headless --path . --script tests/input_test.gd -- --no-music
+```
+
+Simuliert Tastendrücke und Touches: beide Shift-Tasten gleichzeitig (auch wenn das Betriebssystem das
+Loslassen einer Taste verschluckt), mehrere Tasten für dieselbe Seite, Fensterwechsel mit gedrückten
+Tasten und Multitouch. Kein Flipper darf danach oben hängen bleiben.
+
+```sh
 godot --headless --path . --fixed-fps 120 --quit-after 36000 -- --autoplay
 ```
 

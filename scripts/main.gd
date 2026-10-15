@@ -95,9 +95,10 @@ var auto_launch_timer := 0.0
 
 # Eingabe
 var touches := {}
-var key_left := false
-var key_right := false
-var key_plunger := false
+## Gehaltene Tasten: "Code:Position" -> {side: "L"/"R"/"P", code, physical}.
+## Jede Taste einzeln, damit z. B. A und Pfeil-links sich nicht gegenseitig
+## loslassen; wird jedes Frame mit dem echten Tastaturzustand abgeglichen.
+var held_keys := {}
 var _left_was := false
 var _right_was := false
 
@@ -744,9 +745,9 @@ func _process(_delta: float) -> void:
 
 
 func _update_controls() -> void:
-	var left := key_left
-	var right := key_right
-	var plunger := key_plunger
+	var left := _key_side_held("L")
+	var right := _key_side_held("R")
+	var plunger := _key_side_held("P")
 	for side in touches.values():
 		if side == "L":
 			left = true
@@ -1035,6 +1036,54 @@ func _pointer_up(index: int) -> void:
 	touches.erase(index)
 
 
+## Welche Flipper-Seite eine Taste steuert ("L", "R", Plunger "P" oder "").
+static func _side_for(code: Key, location: KeyLocation) -> String:
+	match code:
+		KEY_A, KEY_LEFT, KEY_Y, KEY_Z:
+			return "L"
+		KEY_L, KEY_RIGHT:
+			return "R"
+		KEY_SHIFT, KEY_CTRL:
+			return "R" if location == KEY_LOCATION_RIGHT else "L"
+		KEY_SPACE, KEY_DOWN, KEY_ENTER, KEY_KP_ENTER:
+			return "P"
+	return ""
+
+
+## Ist mindestens eine Taste dieser Seite gedrückt? Tasten, die das System
+## nicht mehr als gedrückt meldet, werden dabei verworfen. Das fängt den Fall
+## ab, dass Windows/macOS beim Loslassen einer von zwei gleichzeitig
+## gehaltenen Tasten kein Ereignis schickt – sonst bliebe ein Flipper
+## dauerhaft oben.
+func _key_side_held(side: String) -> bool:
+	var result := false
+	for id in held_keys.keys():
+		var h: Dictionary = held_keys[id]
+		var code: Key = h["code"]
+		# Shift/Ctrl lassen sich nicht pro Seite abfragen (siehe _key()).
+		if code != KEY_SHIFT and code != KEY_CTRL:
+			var still: bool = Input.is_physical_key_pressed(code) if h["physical"] else Input.is_key_pressed(code)
+			if not still:
+				held_keys.erase(id)
+				continue
+		if h["side"] == side:
+			result = true
+	return result
+
+
+func _release_held(code: Key) -> void:
+	for id in held_keys.keys():
+		if held_keys[id]["code"] == code:
+			held_keys.erase(id)
+
+
+func _notification(what: int) -> void:
+	# Fensterwechsel (Cmd-Tab, Alt-Tab): alle Flipper loslassen.
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+		held_keys.clear()
+		touches.clear()
+
+
 func _toggle_music() -> void:
 	music_on = not music_on
 	sfx.music_on = music_on
@@ -1064,21 +1113,28 @@ func _key(e: InputEventKey) -> void:
 	if e.echo:
 		return
 	var down := e.pressed
-	match e.keycode:
-		KEY_A, KEY_LEFT, KEY_Y, KEY_Z:
-			key_left = down
-		KEY_L, KEY_RIGHT:
-			key_right = down
-		KEY_SHIFT, KEY_CTRL:
-			if e.location == KEY_LOCATION_RIGHT:
-				key_right = down
-			else:
-				key_left = down
-		KEY_SPACE, KEY_DOWN, KEY_ENTER, KEY_KP_ENTER:
-			if state == State.ATTRACT and down:
+	var physical := e.physical_keycode != KEY_NONE
+	var code: Key = e.physical_keycode if physical else e.keycode
+	var side := _side_for(code, e.location)
+	if side != "":
+		var id := "%d:%d" % [code, e.location]
+		if side == "P" and state == State.ATTRACT:
+			if down:
 				_start_game(1)
-			else:
-				key_plunger = down
+		elif down:
+			held_keys[id] = {"side": side, "code": code, "physical": physical}
+		else:
+			held_keys.erase(id)
+	# Shift/Ctrl gibt es links und rechts, Godot führt aber nur eine gemeinsame
+	# Taste. Ob noch eine davon gehalten wird, verrät der Modifier-Zustand des
+	# Ereignisses. Ist keine mehr gedrückt, werden beide Seiten losgelassen –
+	# auch wenn das System das Loslassen der ersten Taste verschluckt hat.
+	var modifier_key := code == KEY_SHIFT or code == KEY_CTRL
+	if not down or not modifier_key:
+		if not e.shift_pressed:
+			_release_held(KEY_SHIFT)
+		if not e.ctrl_pressed:
+			_release_held(KEY_CTRL)
 	if not down:
 		return
 	match e.keycode:
